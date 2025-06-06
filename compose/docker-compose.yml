@@ -2,11 +2,13 @@ version: '3.9'
 
 x-kong-config:
   &kong-env
-  KONG_DATABASE: ${KONG_DATABASE:-off}
+  KONG_DATABASE: ${KONG_DATABASE:-postgres}
   KONG_PG_DATABASE: ${KONG_PG_DATABASE:-kong}
   KONG_PG_HOST: db
   KONG_PG_USER: ${KONG_PG_USER:-kong}
   KONG_PG_PASSWORD_FILE: /run/secrets/kong_postgres_password
+  # This is used as the bootstrap super-admin token
+  KONG_PASSWORD: ${KONG_PASSWORD:-E1SzgfoRe82znqmuUK}
 
 volumes:
   kong_data: {}
@@ -59,30 +61,35 @@ services:
       <<: *kong-env
       KONG_ADMIN_ACCESS_LOG: /dev/stdout
       KONG_ADMIN_ERROR_LOG: /dev/stderr
-      KONG_PROXY_LISTEN: "${KONG_PROXY_LISTEN:-0.0.0.0:8000}"
-      KONG_ADMIN_LISTEN: "${KONG_ADMIN_LISTEN:-0.0.0.0:8001}"
-      KONG_ADMIN_GUI_LISTEN: "${KONG_ADMIN_GUI_LISTEN:-0.0.0.0:8002}"
+      KONG_PROXY_LISTEN: "${KONG_PROXY_LISTEN:-0.0.0.0:8000, 0.0.0.0:8443 ssl}"
+      KONG_ADMIN_LISTEN: "0.0.0.0:8001"
+      KONG_ADMIN_GUI_LISTEN: "0.0.0.0:8002"
       KONG_PROXY_ACCESS_LOG: /dev/stdout
       KONG_PROXY_ERROR_LOG: /dev/stderr
       KONG_PREFIX: ${KONG_PREFIX:-/var/run/kong}
-      KONG_DECLARATIVE_CONFIG: "/opt/kong/kong.yaml"
+      
+      # --- SECURE KONG MANAGER CONFIGURATION ---
+      # 1. Set the URL where Manager will be accessed.
+      #    !! IMPORTANT: CHANGE this to your actual domain !!
+      KONG_ADMIN_GUI_URL: "https://kong-manager.yourdomain.com"
+      # 2. Enable Role-Based Access Control (RBAC) with a login form.
+      KONG_ADMIN_GUI_AUTH: basic-auth
+      # 3. Point to the secure session configuration file.
+      KONG_ADMIN_GUI_SESSION_CONF_FILE: /run/secrets/kong_gui_session_conf
+
     secrets:
       - kong_postgres_password
+      - kong_gui_session_conf
+      - source: kong_gui_session_secret
+        target: /run/secrets/kong_gui_session_secret
+
     networks:
       - kong-net
     ports:
-      # The following two environment variables default to an insecure value (0.0.0.0)
-      # according to the CIS Security test.
+      # We ONLY expose the proxy ports. Admin ports are now internal.
       - "${KONG_INBOUND_PROXY_LISTEN:-0.0.0.0}:8000:8000/tcp"
       - "${KONG_INBOUND_SSL_PROXY_LISTEN:-0.0.0.0}:8443:8443/tcp"
-      # Making them mandatory but undefined, like so would be backwards-breaking:
-      # - "${KONG_INBOUND_PROXY_LISTEN?Missing inbound proxy host}:8000:8000/tcp"
-      # - "${KONG_INBOUND_SSL_PROXY_LISTEN?Missing inbound proxy ssl host}:8443:8443/tcp"
-      # Alternative is deactivating check 5.13 in the security bench, if we consider Kong's own config to be enough security here
 
-      - "8001:8001/tcp"
-      - "8444:8444/tcp"
-      - "8002:8002/tcp"
     healthcheck:
       test: [ "CMD", "kong", "health" ]
       interval: 10s
@@ -93,7 +100,6 @@ services:
     volumes:
       - kong_prefix_vol:${KONG_PREFIX:-/var/run/kong}
       - kong_tmp_vol:/tmp
-      - ./config:/opt/kong
     security_opt:
       - no-new-privileges
 
@@ -130,3 +136,7 @@ services:
 secrets:
   kong_postgres_password:
     file: ./POSTGRES_PASSWORD
+  kong_gui_session_conf:
+    file: ./KONG_GUI_SESSION_CONF
+  kong_gui_session_secret:
+    file: ./secrets/kong_gui_session_secret
