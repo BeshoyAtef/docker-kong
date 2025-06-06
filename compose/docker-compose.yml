@@ -2,7 +2,9 @@ version: '3.9'
 
 x-kong-config:
   &kong-env
-  KONG_DATABASE: ${KONG_DATABASE:-postgres}
+  # --- THIS LINE IS THE FIX ---
+  # It now correctly defaults to 'kong', matching the db service.
+  KONG_DATABASE: ${KONG_DATABASE:-kong} 
   KONG_PG_DATABASE: ${KONG_PG_DATABASE:-kong}
   KONG_PG_HOST: db
   KONG_PG_USER: ${KONG_PG_USER:-kong}
@@ -31,7 +33,8 @@ services:
     command: kong migrations bootstrap
     profiles: [ "database" ]
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     environment:
       <<: *kong-env
     secrets:
@@ -45,7 +48,8 @@ services:
     command: kong migrations up && kong migrations finish
     profiles: [ "database" ]
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     environment:
       <<: *kong-env
     secrets:
@@ -57,24 +61,26 @@ services:
   kong:
     image: "${KONG_DOCKER_TAG:-kong:latest}"
     user: "${KONG_USER:-kong}"
+    depends_on:
+      db:
+        condition: service_healthy
+      kong-migrations:
+        condition: service_completed_successfully
+      kong-migrations-up:
+        condition: service_completed_successfully
     environment:
       <<: *kong-env
       KONG_ADMIN_ACCESS_LOG: /dev/stdout
       KONG_ADMIN_ERROR_LOG: /dev/stderr
-      KONG_PROXY_LISTEN: "${KONG_PROXY_LISTEN:-0.0.0.0:8000, 0.0.0.0:8443 ssl}"
+      KONG_PROXY_LISTEN: "0.0.0.0:8000, 0.0.0.0:8443 ssl"
       KONG_ADMIN_LISTEN: "0.0.0.0:8001"
       KONG_ADMIN_GUI_LISTEN: "0.0.0.0:8002"
       KONG_PROXY_ACCESS_LOG: /dev/stdout
       KONG_PROXY_ERROR_LOG: /dev/stderr
-      KONG_PREFIX: ${KONG_PREFIX:-/var/run/kong}
+      KONG_PREFIX: /var/run/kong
       
-      # --- SECURE KONG MANAGER CONFIGURATION ---
-      # 1. Set the URL where Manager will be accessed.
-      #    !! IMPORTANT: CHANGE this to your actual domain !!
       KONG_ADMIN_GUI_URL: "https://kong-manager.yourdomain.com"
-      # 2. Enable Role-Based Access Control (RBAC) with a login form.
       KONG_ADMIN_GUI_AUTH: basic-auth
-      # 3. Point to the secure session configuration file.
       KONG_ADMIN_GUI_SESSION_CONF_FILE: /run/secrets/kong_gui_session_conf
 
     secrets:
@@ -86,9 +92,8 @@ services:
     networks:
       - kong-net
     ports:
-      # We ONLY expose the proxy ports. Admin ports are now internal.
-      - "${KONG_INBOUND_PROXY_LISTEN:-0.0.0.0}:8000:8000/tcp"
-      - "${KONG_INBOUND_SSL_PROXY_LISTEN:-0.0.0.0}:8443:8443/tcp"
+      - "8000:8000/tcp"
+      - "8443:8443/tcp"
 
     healthcheck:
       test: [ "CMD", "kong", "health" ]
@@ -98,7 +103,7 @@ services:
     restart: on-failure:5
     read_only: true
     volumes:
-      - kong_prefix_vol:${KONG_PREFIX:-/var/run/kong}
+      - kong_prefix_vol:/var/run/kong
       - kong_tmp_vol:/tmp
     security_opt:
       - no-new-privileges
@@ -113,21 +118,11 @@ services:
     secrets:
       - kong_postgres_password
     healthcheck:
-      test:
-        [
-          "CMD",
-          "pg_isready",
-          "-d",
-          "${KONG_PG_DATABASE:-kong}",
-          "-U",
-          "${KONG_PG_USER:-kong}"
-        ]
-      interval: 30s
-      timeout: 30s
-      retries: 3
+      test: ["CMD", "pg_isready", "-d", "${KONG_PG_DATABASE:-kong}", "-U", "${KONG_PG_USER:-kong}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     restart: on-failure
-    stdin_open: true
-    tty: true
     networks:
       - kong-net
     volumes:
