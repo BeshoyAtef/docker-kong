@@ -2,9 +2,7 @@ version: '3.9'
 
 x-kong-config:
   &kong-env
-  # --- THIS LINE IS THE FIX ---
-  # It now correctly defaults to 'kong', matching the db service.
-  KONG_DATABASE: ${KONG_DATABASE:-kong} 
+  KONG_DATABASE: ${KONG_DATABASE:-kong}
   KONG_PG_DATABASE: ${KONG_PG_DATABASE:-kong}
   KONG_PG_HOST: db
   KONG_PG_USER: ${KONG_PG_USER:-kong}
@@ -31,7 +29,6 @@ services:
   kong-migrations:
     image: "${KONG_DOCKER_TAG:-kong:latest}"
     command: kong migrations bootstrap
-    profiles: [ "database" ]
     depends_on:
       db:
         condition: service_healthy
@@ -46,7 +43,6 @@ services:
   kong-migrations-up:
     image: "${KONG_DOCKER_TAG:-kong:latest}"
     command: kong migrations up && kong migrations finish
-    profiles: [ "database" ]
     depends_on:
       db:
         condition: service_healthy
@@ -79,6 +75,7 @@ services:
       KONG_PROXY_ERROR_LOG: /dev/stderr
       KONG_PREFIX: /var/run/kong
       
+      # --- SECURE KONG MANAGER CONFIGURATION ---
       KONG_ADMIN_GUI_URL: "https://kong-manager.yourdomain.com"
       KONG_ADMIN_GUI_AUTH: basic-auth
       KONG_ADMIN_GUI_SESSION_CONF_FILE: /run/secrets/kong_gui_session_conf
@@ -110,7 +107,7 @@ services:
 
   db:
     image: postgres:9.5
-    profiles: [ "database" ]
+    # The "profiles" line has been removed from here.
     environment:
       POSTGRES_DB: ${KONG_PG_DATABASE:-kong}
       POSTGRES_USER: ${KONG_PG_USER:-kong}
