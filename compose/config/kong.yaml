@@ -14,6 +14,7 @@ _transform: true
 admin_gui_url: "https://gateway.erg.st"
 admin_gui_auth: basic-auth
 admin_gui_session_conf: /run/secrets/kong_gui_session_conf
+KONG_ADMIN_GUI_API_URL: http://gateway.erg.st:8001
 
 # -----------------------------------------------------------------------------
 # Part 2: Kong Service and Route for the Manager (replaces `curl` commands)
