@@ -51,7 +51,7 @@ services:
       - "--entryPoints.web.address=:80"
       - "--entryPoints.websecure.address=:443"
       - "--certificatesResolvers.le.acme.tlsChallenge=true"
-      - "--certificatesResolvers.le.acme.email=${LETSENCRYPT_EMAIL}"
+      - "--certificatesResolvers.le.acme.email=beshoy@ergasti.com
       - "--certificatesResolvers.le.acme.storage=/letsencrypt/acme.json"
     ports:
       - "80:80"
