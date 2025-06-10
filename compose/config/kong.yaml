@@ -1,58 +1,159 @@
-# a very minimal declarative config file
-_format_version: "2.1"
-_transform: true
-# This specifies the format version and is highly recommended.
+version: '3.9'
 
-# -----------------------------------------------------------------------------
-# Part 1: Main Kong Configuration (replaces environment variables)
-# -----------------------------------------------------------------------------
-# These keys directly map to the KONG_ environment variables.
-# KONG_ADMIN_GUI_URL -> admin_gui_url
-# KONG_ADMIN_GUI_AUTH -> admin_gui_auth
-# KONG_ADMIN_GUI_SESSION_CONF_FILE -> admin_gui_session_conf
+############################
+# Shared Env for Kong
+############################
+x-kong-env: &kong-env
+  KONG_DATABASE: ${KONG_DATABASE:-off}
+  KONG_PG_DATABASE: ${KONG_PG_DATABASE:-kong}
+  KONG_PG_HOST: db
+  KONG_PG_USER: ${KONG_PG_USER:-kong}
+  KONG_PG_PASSWORD_FILE: /run/secrets/kong_postgres_password
+  KONG_DECLARATIVE_CONFIG: "/opt/kong/kong.yaml"
+  KONG_ADMIN_GUI_AUTH: basic-auth
+  KONG_ADMIN_LISTEN: 0.0.0.0:8001
+  KONG_ADMIN_GUI_LISTEN: 0.0.0.0:8002
+  KONG_PROXY_LISTEN: 0.0.0.0:8000
 
-admin_gui_url: "https://gateway.erg.st"
-admin_gui_auth: basic-auth
-admin_gui_session_conf: /run/secrets/kong_gui_session_conf
-KONG_ADMIN_GUI_API_URL: http://gateway.erg.st:8001
+############################
+# Volumes & Networks
+############################
+volumes:
+  kong_data: {}
+  kong_prefix_vol:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+  kong_tmp_vol:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+  letsencrypt: {}
 
-# -----------------------------------------------------------------------------
-# Part 2: Kong Service and Route for the Manager (replaces `curl` commands)
-# -----------------------------------------------------------------------------
-# This creates the proxy rule to expose the internal Manager UI.
+networks:
+  kong-net:
+
+############################
+# Services
+############################
 services:
-- name: kong-manager-service
-  url: http://localhost:8002
-  routes:
-  - name: kong-manager-route
-    hosts:
-    - gateway.erg.st
-    protocols:
-    - https
-    strip_path: true
 
-# -----------------------------------------------------------------------------
-# Part 3: RBAC Configuration (Required for basic-auth in DB-less mode)
-# -----------------------------------------------------------------------------
-# You must define users and roles here. You cannot create them via the API.
+  ## 1) Traefik Edge Router
+  traefik:
+    image: traefik:v2.9
+    command:
+      - "--api.insecure=false"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entryPoints.web.address=:80"
+      - "--entryPoints.websecure.address=:443"
+      - "--certificatesResolvers.le.acme.tlsChallenge=true"
+      - "--certificatesResolvers.le.acme.email=${LETSENCRYPT_EMAIL}"
+      - "--certificatesResolvers.le.acme.storage=/letsencrypt/acme.json"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - letsencrypt:/letsencrypt
+    networks:
+      - kong-net
+    restart: unless-stopped
 
-# Define a role named 'super-admin' with full permissions.
-rbac_roles:
-- name: super-admin
-  # The endpoint '*' gives access to everything.
-  permissions:
-    workspaces:
-    - name: default
-      endpoints:
-      - "*"
+  ## 2) Kong Database (Postgres 9.5)
+  db:
+    image: postgres:9.5
+    environment:
+      POSTGRES_DB: ${KONG_PG_DATABASE:-kong}
+      POSTGRES_USER: ${KONG_PG_USER:-kong}
+      POSTGRES_PASSWORD_FILE: /run/secrets/kong_postgres_password
+    secrets:
+      - kong_postgres_password
+    volumes:
+      - kong_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD","pg_isready","-d","${KONG_PG_DATABASE:-kong}","-U","${KONG_PG_USER:-kong}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - kong-net
+    restart: on-failure
 
-# Define a user.
-# !! IMPORTANT: Change the password below to something very strong.
-rbac_users:
-- name: manager_admin
-  password: "a-very-strong-and-secret-password"
-  
-# Assign the 'super-admin' role to the 'manager_admin' user.
-rbac_user_roles:
-- user: manager_admin
-  role: super-admin
+  ## 3) Kong Migrations (run-once)
+  kong-migrations:
+    image: "${KONG_DOCKER_TAG:-kong:latest}"
+    command: kong migrations bootstrap
+    depends_on:
+      - db
+    environment:
+      <<: *kong-env
+      KONG_DATABASE: postgres
+    secrets:
+      - kong_postgres_password
+    networks:
+      - kong-net
+    restart: on-failure
+
+  ## 4) Kong Core + Manager GUI
+  kong:
+    image: "${KONG_DOCKER_TAG:-kong:latest}"
+    user: "${KONG_USER:-kong}"
+    depends_on:
+      - kong-migrations
+    environment:
+      <<: *kong-env
+      # Manager UI needs to call the Admin API here:
+      KONG_ADMIN_GUI_API_URL: http://127.0.0.1:8001
+      KONG_ADMIN_GUI_URL: https://gateway.erg.st
+    secrets:
+      - kong_postgres_password
+    networks:
+      - kong-net
+    volumes:
+      - kong_prefix_vol:/var/run/kong
+      - kong_tmp_vol:/tmp
+      - ./config:/opt/kong                # your kong.yaml here
+    healthcheck:
+      test: ["CMD","kong","health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: on-failure
+
+    # Expose Admin API & Manager GUI to localhost only:
+    ports:
+      - "127.0.0.1:8001:8001"   # Admin API
+      - "127.0.0.1:8002:8002"   # Kong Manager GUI
+      - "0.0.0.0:8000:8000"     # Proxy (public)
+
+    labels:
+      # Enable Traefik for Kong Manager GUI at gateway.erg.st
+      - "traefik.enable=true"
+      - "traefik.http.routers.kong-manager.rule=Host(`gateway.erg.st`)"
+      - "traefik.http.routers.kong-manager.entrypoints=websecure"
+      - "traefik.http.routers.kong-manager.tls=true"
+      - "traefik.http.routers.kong-manager.tls.certresolver=le"
+      - "traefik.http.services.kong-manager.loadbalancer.server.port=8002"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+      - "traefik.http.routers.kong-manager.middlewares=redirect-to-https@docker"
+
+      # --- New: Expose & Protect Admin API via Traefik ---
+      # Router for admin API (on its own subdomain)
+      - "traefik.http.routers.kong-admin.rule=Host(`admin.gateway.erg.st`)"
+      - "traefik.http.routers.kong-admin.entrypoints=websecure"
+      - "traefik.http.routers.kong-admin.tls=true"
+      - "traefik.http.routers.kong-admin.tls.certresolver=le"
+      # Attach our basic-auth middleware
+      - "traefik.http.routers.kong-admin.middlewares=admin-auth@docker,redirect-to-https@docker"
+      # Service pointing at container port 8001
+      - "traefik.http.services.kong-admin.loadbalancer.server.port=8001"
+      # Define the basic-auth middleware (generate your own htpasswd!)
+      - "traefik.http.middlewares.admin-auth.basicauth.users=manager_admin:$$apr1$$H6uskkkW$$IgXLP6ewTrSuBkTrqE8wj/" 
+
+############################
+# Secrets
+############################
+secrets:
+  kong_postgres_password:
+    file: ./POSTGRES_PASSWORD
