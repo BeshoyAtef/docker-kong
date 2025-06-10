@@ -9,11 +9,8 @@ x-kong-env: &kong-env
   KONG_PG_HOST: db
   KONG_PG_USER: ${KONG_PG_USER:-kong}
   KONG_PG_PASSWORD_FILE: /run/secrets/kong_postgres_password
-  # In DB-less mode Kong will load kong.yaml on every start:
   KONG_DECLARATIVE_CONFIG: "/opt/kong/kong.yaml"
-  # Protect the Manager GUI with Kong’s basic-auth
   KONG_ADMIN_GUI_AUTH: basic-auth
-  # Listen only inside the container / network
   KONG_ADMIN_LISTEN: 0.0.0.0:8001
   KONG_ADMIN_GUI_LISTEN: 0.0.0.0:8002
   KONG_PROXY_LISTEN: 0.0.0.0:8000
@@ -98,7 +95,7 @@ services:
       - kong-net
     restart: on-failure
 
-  ## 4) Kong Core
+  ## 4) Kong Core + Manager GUI
   kong:
     image: "${KONG_DOCKER_TAG:-kong:latest}"
     user: "${KONG_USER:-kong}"
@@ -106,12 +103,9 @@ services:
       - kong-migrations
     environment:
       <<: *kong-env
-      # If you want hybrid mode, uncomment:
-      # KONG_DATABASE: postgres
-
-      # Tell Kong Manager where the Admin API is reachable
-      KONG_ADMIN_API_URI: http://localhost:8001
-      # Public URL of Kong Manager GUI
+      # Tell Kong Manager where to find the Admin API:
+      KONG_ADMIN_GUI_API_URL: http://gateway.erg.st:8001
+      # Public URL of the Manager GUI itself:
       KONG_ADMIN_GUI_URL: https://gateway.erg.st
 
     secrets:
@@ -121,7 +115,7 @@ services:
     volumes:
       - kong_prefix_vol:/var/run/kong
       - kong_tmp_vol:/tmp
-      - ./config:/opt/kong                # your kong.yaml here
+      - ./config:/opt/kong                # kong.yaml here
     healthcheck:
       test: ["CMD","kong","health"]
       interval: 10s
@@ -130,19 +124,17 @@ services:
     restart: on-failure
 
     labels:
-      # enable Traefik routing
+      # Enable Traefik for this container
       - "traefik.enable=true"
 
-      # route HTTPS to Kong Manager GUI
+      # Route incoming HTTPS for gateway.erg.st → port 8002 (Manager GUI)
       - "traefik.http.routers.kong-manager.rule=Host(`gateway.erg.st`)"
       - "traefik.http.routers.kong-manager.entrypoints=websecure"
       - "traefik.http.routers.kong-manager.tls=true"
       - "traefik.http.routers.kong-manager.tls.certresolver=le"
-
-      # target port inside the container
       - "traefik.http.services.kong-manager.loadbalancer.server.port=8002"
 
-      # redirect HTTP → HTTPS
+      # Redirect plain HTTP → HTTPS
       - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
       - "traefik.http.routers.kong-manager.middlewares=redirect-to-https@docker"
 
